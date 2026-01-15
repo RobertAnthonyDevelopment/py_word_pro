@@ -38,13 +38,6 @@ To start the application, run the main entry point from your terminal:
 ```bash
 python main.py
 
-### Key Controls
-
-**Format Text:** Use the Ribbon bar for Bold, Italic, and Colors.
-**Insert Code:** Go to the *Developer* tab and click "Code Block" or type ````` manually.
-**Run Scripts:** Write Python code in the editor and click "Run (Async)" in the *Developer* tab.
-**Save/Open:** Use the *File* menu in the top left.
-
 PyWordPro/
 ├── main.py                 # Application Entry Point
 ├── requirements.txt        # Dependencies
