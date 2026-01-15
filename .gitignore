@@ -1,0 +1,15 @@
+# --- Python Junk ---
+__pycache__/
+*.pyc
+
+# --- Mac Junk ---
+.DS_Store
+
+# --- Your App's Temporary Files ---
+*.tmp
+autosave.tmp
+
+# --- Virtual Environments ---
+env/
+venv/
+.venv/
