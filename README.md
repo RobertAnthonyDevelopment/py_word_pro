@@ -95,5 +95,3 @@ Distributed under the MIT License. See `LICENSE` for more information.
     git commit -m "Added README documentation"
     git push
     ```
-
-```
