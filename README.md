@@ -40,16 +40,11 @@ python main.py
 
 ### Key Controls
 
-* **Format Text:** Use the Ribbon bar for Bold, Italic, and Colors.
-* **Insert Code:** Go to the *Developer* tab and click "Code Block" or type ````` manually.
-* **Run Scripts:** Write Python code in the editor and click "Run (Async)" in the *Developer* tab.
-* **Save/Open:** Use the *File* menu in the top left.
+**Format Text:** Use the Ribbon bar for Bold, Italic, and Colors.
+**Insert Code:** Go to the *Developer* tab and click "Code Block" or type ````` manually.
+**Run Scripts:** Write Python code in the editor and click "Run (Async)" in the *Developer* tab.
+**Save/Open:** Use the *File* menu in the top left.
 
-## Project Structure
-
-This project follows a professional modular structure:
-
-```text
 PyWordPro/
 ├── main.py                 # Application Entry Point
 ├── requirements.txt        # Dependencies
