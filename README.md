@@ -1,8 +1,3 @@
-Here is a professional `README.md` file tailored for your GitHub repository. You can copy and paste this content directly into a file named `README.md` in the root of your `PyWordPro` folder.
-
----
-
-```markdown
 # PyWord Pro
 
 **PyWord Pro** is a modern, lightweight, and professional document editor built with Python and Tkinter. It features a clean modular architecture, syntax highlighting for code blocks, PDF/Markdown export capabilities, and a threaded developer console for running Python scripts directly within the editor.
@@ -42,8 +37,6 @@ To start the application, run the main entry point from your terminal:
 
 ```bash
 python main.py
-
-```
 
 ### Key Controls
 
