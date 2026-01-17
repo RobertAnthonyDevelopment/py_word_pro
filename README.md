@@ -2,6 +2,8 @@
 
 **PyWord Pro** is a modern, lightweight, and professional document editor built with Python and Tkinter. It features a clean modular architecture, syntax highlighting for code blocks, PDF/Markdown export capabilities, and a threaded developer console for running Python scripts directly within the editor.
 
+<img width="1603" height="931" alt="py_word_pro" src="https://github.com/user-attachments/assets/b9a33eb0-9098-42de-b94f-195c51aa5d2a" />
+
 ## Features
 
 * **Professional Document Editing:** Rich text support with fonts, sizes, colors, and alignment.
