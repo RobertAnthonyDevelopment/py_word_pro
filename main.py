@@ -1,12 +1,8 @@
 import tkinter as tk
-from src.app import PyWordEnterprise
+# We changed the class name to 'App' in the new script, so we must import 'App'
+from src.app import App 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    try:
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
-    except: pass
-    
-    app = PyWordEnterprise(root)
+    app = App(root)
     root.mainloop()
