@@ -1,6 +1,7 @@
-python-docx
+tkinter
 Pillow
-PyMuPDF
-fpdf
+python-docx
+pymupdf
 pyttsx3
+fpdf
 pyspellchecker
