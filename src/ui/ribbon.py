@@ -1,13 +1,14 @@
 import tkinter as tk
 from tkinter import ttk, font
 
+
 class Ribbon(tk.Frame):
     def __init__(self, parent, callbacks, colors):
         super().__init__(parent, bg=colors["ribbon"], bd=1, relief=tk.RAISED)
         self.pack(side=tk.TOP, fill=tk.X)
         self.callbacks = callbacks
         self.colors = colors
-        
+
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -17,15 +18,40 @@ class Ribbon(tk.Frame):
         self._init_review()
 
     def update_theme(self, colors):
+        """
+        Apply theme updates across tk-based ribbon widgets.
+        (ttk widgets are style-driven and may require ttk.Style configuration for full fidelity.)
+        """
         self.colors = colors
-        self.config(bg=colors["ribbon"])
-        # Note: Updating internal frames requires iterating through children or 
-        # destroying/recreating ribbon. For simplicity in this structure, 
-        # we update the main background. Ideally, restart app for full theme apply.
+        try:
+            self.config(bg=colors["ribbon"])
+        except tk.TclError:
+            pass
+
+        def _safe_cfg(w, **kwargs):
+            try:
+                w.configure(**kwargs)
+            except tk.TclError:
+                pass
+
+        def _walk(w):
+            for child in w.winfo_children():
+                # Update common tk widgets
+                if isinstance(child, (tk.Frame, tk.LabelFrame)):
+                    _safe_cfg(child, bg=colors["ribbon"])
+                elif isinstance(child, tk.Label):
+                    _safe_cfg(child, bg=colors["ribbon"], fg=colors.get("text", "#000"))
+                elif isinstance(child, tk.Button):
+                    _safe_cfg(child, bg=colors["ribbon"], fg=colors.get("text", "#000"))
+                _walk(child)
+
+        _walk(self)
 
     def _create_group(self, parent, text):
-        frame = tk.LabelFrame(parent, text=text, padx=5, pady=5, 
-                              bg=self.colors["ribbon"], font=("Segoe UI", 9))
+        frame = tk.LabelFrame(
+            parent, text=text, padx=5, pady=5,
+            bg=self.colors["ribbon"], font=("Segoe UI", 9)
+        )
         frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
         return frame
 
@@ -50,8 +76,8 @@ class Ribbon(tk.Frame):
         self.cb_font.set("Calibri")
         self.cb_font.pack(side=tk.LEFT, padx=2)
         self.cb_font.bind("<<ComboboxSelected>>", lambda e: self.callbacks['font_fam'](self.cb_font.get()))
-        
-        self.cb_size = ttk.Combobox(f_top, values=[8,10,11,12,14,16,18,24,36], width=3, state="readonly")
+
+        self.cb_size = ttk.Combobox(f_top, values=[8, 10, 11, 12, 14, 16, 18, 24, 36], width=3, state="readonly")
         self.cb_size.set(11)
         self.cb_size.pack(side=tk.LEFT, padx=2)
         self.cb_size.bind("<<ComboboxSelected>>", lambda e: self.callbacks['font_size'](self.cb_size.get()))
@@ -70,7 +96,7 @@ class Ribbon(tk.Frame):
         tk.Button(g_para, text="≡L", command=self.callbacks['align_l']).pack(side=tk.LEFT, fill=tk.Y)
         tk.Button(g_para, text="≡C", command=self.callbacks['align_c']).pack(side=tk.LEFT, fill=tk.Y)
         tk.Button(g_para, text="≡R", command=self.callbacks['align_r']).pack(side=tk.LEFT, fill=tk.Y)
-        
+
         f_space = tk.Frame(g_para, bg=self.colors["ribbon"])
         f_space.pack(side=tk.LEFT, padx=5)
         tk.Label(f_space, text="Spacing", font=("Arial", 8), bg=self.colors["ribbon"]).pack(side=tk.TOP)
@@ -82,19 +108,22 @@ class Ribbon(tk.Frame):
     def _init_insert(self):
         tab = tk.Frame(self.notebook, bg=self.colors["ribbon"])
         self.notebook.add(tab, text="  Insert  ")
+
         g_media = self._create_group(tab, "Media")
         tk.Button(g_media, text="🖼 Image", command=self.callbacks['img']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         tk.Button(g_media, text="___ Line", command=self.callbacks['hr_line']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
+
         g_txt = self._create_group(tab, "Text")
         tk.Button(g_txt, text="📅 Date", command=self.callbacks['date']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         tk.Button(g_txt, text="Ω Symbol", command=self.callbacks['symbol']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
+
         g_tools = self._create_group(tab, "Tools")
         tk.Button(g_tools, text="🔍 Find", command=self.callbacks['find']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
 
     def _init_view(self):
         tab = tk.Frame(self.notebook, bg=self.colors["ribbon"])
         self.notebook.add(tab, text="  View  ")
-        
+
         g_mode = self._create_group(tab, "Window")
         tk.Button(g_mode, text="🌓 Theme", command=self.callbacks.get('theme')).pack(side=tk.LEFT, padx=2, fill=tk.Y)
         tk.Button(g_mode, text="🔲 Focus", command=self.callbacks.get('focus')).pack(side=tk.LEFT, padx=2, fill=tk.Y)
@@ -103,14 +132,17 @@ class Ribbon(tk.Frame):
         g_zoom = self._create_group(tab, "Zoom")
         tk.Button(g_zoom, text="➕ In", command=self.callbacks['zoom_in']).pack(side=tk.LEFT, padx=2, fill=tk.Y)
         tk.Button(g_zoom, text="➖ Out", command=self.callbacks['zoom_out']).pack(side=tk.LEFT, padx=2, fill=tk.Y)
+
         g_page = self._create_group(tab, "Page Setup")
         tk.Button(g_page, text="Paper Color", command=self.callbacks['pg_color']).pack(side=tk.LEFT, padx=2, fill=tk.Y)
 
     def _init_review(self):
         tab = tk.Frame(self.notebook, bg=self.colors["ribbon"])
         self.notebook.add(tab, text="  Review  ")
+
         g_proof = self._create_group(tab, "Proofing")
         tk.Button(g_proof, text="ABC Check", command=self.callbacks['spell']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         tk.Button(g_proof, text="123 Count", command=self.callbacks['stats']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
+
         g_speech = self._create_group(tab, "Speech")
         tk.Button(g_speech, text="▶ Read Aloud", command=self.callbacks['tts']).pack(side=tk.LEFT, padx=5, fill=tk.Y)
