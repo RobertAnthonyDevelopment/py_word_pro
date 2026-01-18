@@ -71,11 +71,6 @@ Distributed under the MIT License.
 ---
 
 **Developed by Robert Anthony Development**
-
-### How to Add This to Your Project
-1.  Create a file named `README.md` inside your `PyWordPro` folder.
-2.  Paste the text above into it and save.
-3.  Run these commands in your terminal to update GitHub:
     ```bash
     git add README.md
     git commit -m "Added README documentation"
