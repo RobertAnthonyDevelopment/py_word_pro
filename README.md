@@ -8,7 +8,7 @@
 
 * **Professional Document Editing:** Rich text support with fonts, sizes, colors, and alignment.
 * **Modular Architecture:** Cleanly separated UI, Logic, and Configuration for scalability.
-* **File Support:** Open and Save `.pdf`, `.txt`, `.md`, and `.py`.
+* **File Support:** Open and Save `.docx`.`.pdf`, `.txt`, `.md`, and `.py`.
 * **Export Options:** Export documents to professionally formatted PDF or Markdown.
 * **Media Support:** Insert images and resize them dynamically.
 * **Theming:** Built-in Light and Dark modes.
