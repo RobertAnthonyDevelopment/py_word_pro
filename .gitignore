@@ -1,18 +1,15 @@
-__pycache__/
-*.pyc
-autosave.tmp
-# --- Python Junk ---
+# --- Python ---
 __pycache__/
 *.pyc
 
-# --- Mac Junk ---
+# --- macOS ---
 .DS_Store
 
-# --- Your App's Temporary Files ---
+# --- App temp files ---
 *.tmp
 autosave.tmp
 
-# --- Virtual Environments ---
+# --- Virtual environments ---
 env/
 venv/
 .venv/
