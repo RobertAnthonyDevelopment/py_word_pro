@@ -139,52 +139,169 @@ class FormatManager:
             return
 
         try:
-            if not self.editor.tag_ranges("sel"):
-                # No selection: apply to the current word/line character so the
-                # user sees an immediate effect. This also makes subsequent
-                # typing inherit the style in most cases (Tk copies tags from
-                # the char to the left of the insert mark).
-                start = self.editor.index("insert")
-                end = self.editor.index("insert +1c")
-                if self.editor.compare(end, ">", "end-1c"):
-                    end = self.editor.index("end-1c")
-                if self.editor.compare(start, "==", end):
-                    return
-            else:
+            has_sel = bool(self.editor.tag_ranges("sel"))
+
+            # --------------------------------------------
+            # Selection mode: preserve existing combinations
+            # --------------------------------------------
+            if has_sel:
                 start, end = self.editor.index("sel.first"), self.editor.index("sel.last")
+                before = self._snapshot_style_ranges(start, end)
 
-            before = self._snapshot_style_ranges(start, end)
+                # Build segments where the existing style flags are uniform.
+                segments = self._style_segments(start, end)
 
-            # Determine current style flags at start.
-            b, i, u, o = self._get_style_flags_at(start)
-            if tag == "bold":
-                b = not b
-            elif tag == "italic":
-                i = not i
-            elif tag == "underline":
-                u = not u
-            elif tag == "overstrike":
-                o = not o
+                # Toggle behavior (Word-like):
+                # - If *all* selected segments already have the style -> remove it
+                # - Otherwise -> apply it everywhere
+                idx = {"bold": 0, "italic": 1, "underline": 2, "overstrike": 3}[tag]
+                all_have = True
+                for a, b, flags in segments:
+                    if not self.editor.compare(a, "<", b):
+                        continue
+                    if not flags[idx]:
+                        all_have = False
+                        break
+                new_val = not all_have
 
-            new_style_tag = self._ensure_style_tag(b=b, italic=i, underline=u, overstrike=o)
-
-            # Replace any existing style tags with the new combined tag.
-            self._remove_style_tags_in_range(start, end)
-            self.editor.tag_add(new_style_tag, start, end)
-
-            after = self._snapshot_style_ranges(start, end)
-
-            def _restore(snapshot):
+                # Remove all style tags in the range, then re-apply per-segment
+                # so we preserve other flags already present.
                 self._remove_style_tags_in_range(start, end)
-                for tname, ranges in snapshot.items():
-                    for a, b2 in ranges:
-                        self.editor.tag_add(tname, a, b2)
 
-            self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+                for a, b, flags in segments:
+                    if not self.editor.compare(a, "<", b):
+                        continue
+
+                    b0, i0, u0, o0 = flags
+                    if tag == "bold":
+                        b0 = new_val
+                    elif tag == "italic":
+                        i0 = new_val
+                    elif tag == "underline":
+                        u0 = new_val
+                    elif tag == "overstrike":
+                        o0 = new_val
+
+                    # If no styles remain, leave it unstyled.
+                    if not (b0 or i0 or u0 or o0):
+                        continue
+
+                    tname = self._ensure_style_tag(b=b0, italic=i0, underline=u0, overstrike=o0)
+                    self.editor.tag_add(tname, a, b)
+
+                after = self._snapshot_style_ranges(start, end)
+
+                def _restore(snapshot):
+                    self._remove_style_tags_in_range(start, end)
+                    for tname, ranges in snapshot.items():
+                        for a, b2 in ranges:
+                            self.editor.tag_add(tname, a, b2)
+
+                self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+
+            # --------------------------------------------
+            # Cursor mode: toggle at insertion point
+            # --------------------------------------------
+            else:
+                # Tk Text inherits tags from the character *to the left* of the
+                # insert mark. Tagging that character makes newly typed text
+                # inherit the formatting (much more reliable than insert+1c).
+                insert = self.editor.index("insert")
+                if self.editor.compare(insert, ">", "1.0"):
+                    start = self.editor.index("insert -1c")
+                    end = insert
+                else:
+                    # At the very start of the document there is no "left" char.
+                    # Fall back to styling the next character if it exists.
+                    start = insert
+                    end = self.editor.index("insert +1c")
+                    if self.editor.compare(end, ">", "end-1c"):
+                        end = self.editor.index("end-1c")
+                    if self.editor.compare(start, "==", end):
+                        return
+
+                before = self._snapshot_style_ranges(start, end)
+                b0, i0, u0, o0 = self._get_style_flags_at(start)
+
+                if tag == "bold":
+                    b0 = not b0
+                elif tag == "italic":
+                    i0 = not i0
+                elif tag == "underline":
+                    u0 = not u0
+                elif tag == "overstrike":
+                    o0 = not o0
+
+                # Apply new combo.
+                self._remove_style_tags_in_range(start, end)
+                if b0 or i0 or u0 or o0:
+                    tname = self._ensure_style_tag(b=b0, italic=i0, underline=u0, overstrike=o0)
+                    self.editor.tag_add(tname, start, end)
+
+                after = self._snapshot_style_ranges(start, end)
+
+                def _restore(snapshot):
+                    self._remove_style_tags_in_range(start, end)
+                    for tname, ranges in snapshot.items():
+                        for a, b2 in ranges:
+                            self.editor.tag_add(tname, a, b2)
+
+                self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+
         except tk.TclError:
             pass
 
         self._checkpoint()
+
+    def _style_segments(self, start: str, end: str):
+        """Return a list of (seg_start, seg_end, flags) that cover [start, end].
+
+        Each segment has uniform (bold, italic, underline, overstrike) flags.
+        """
+
+        def _idx_tuple(idx: str):
+            ln, col = idx.split(".")
+            return int(ln), int(col)
+
+        start = self.editor.index(start)
+        end = self.editor.index(end)
+
+        boundaries = {start, end}
+
+        # Collect boundaries from every style-tag range that overlaps [start, end].
+        style_tags = [t for t in self.editor.tag_names() if t.startswith(STYLE_TAG_PREFIX)]
+        # Include legacy tags too so old documents still behave.
+        style_tags += [t for t in ("bold", "italic", "underline", "overstrike") if t in self.editor.tag_names()]
+
+        for t in style_tags:
+            try:
+                ranges = self.editor.tag_ranges(t)
+            except tk.TclError:
+                continue
+            for i in range(0, len(ranges), 2):
+                a = self.editor.index(ranges[i])
+                b = self.editor.index(ranges[i + 1])
+                if self.editor.compare(b, "<=", start) or self.editor.compare(a, ">=", end):
+                    continue
+                # Clamp to selection.
+                if self.editor.compare(a, "<", start):
+                    a = start
+                if self.editor.compare(b, ">", end):
+                    b = end
+                boundaries.add(a)
+                boundaries.add(b)
+
+        ordered = sorted(boundaries, key=_idx_tuple)
+        segs = []
+        for i in range(len(ordered) - 1):
+            a, b = ordered[i], ordered[i + 1]
+            if not self.editor.compare(a, "<", b):
+                continue
+            segs.append((a, b, self._get_style_flags_at(a)))
+        # If something went wrong, fall back to one segment.
+        if not segs:
+            segs = [(start, end, self._get_style_flags_at(start))]
+        return segs
 
     def _style_tag_name(self, *, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
         bits = (
@@ -663,3 +780,39 @@ class FormatManager:
         pad = int(50 * (self.zoom_level / 100))
         self.editor.configure(font=(self.default_font, size))
         self.editor.configure(padx=pad, pady=pad)
+
+        # Any combined-style tags store their own Font objects. If the base
+        # editor font changes (zoom/family/size), refresh those fonts so
+        # bold/italic combos stay visually consistent.
+        self._refresh_style_fonts()
+
+    def _refresh_style_fonts(self):
+        """Update already-created combined-style fonts to match current base font."""
+        try:
+            base = font.Font(font=self.editor.cget("font"))
+            fam = base.cget("family")
+            sz = base.cget("size")
+        except Exception:
+            return
+
+        for tname, f in list(self._style_fonts.items()):
+            try:
+                # Parse bits out of the tag name.
+                parts = tname[len(STYLE_TAG_PREFIX):].split("_")
+                bits = {p[:1]: p[1:] for p in parts if len(p) == 2}
+
+                b = bits.get("b") == "1"
+                i = bits.get("i") == "1"
+                u = bits.get("u") == "1"
+                o = bits.get("o") == "1"
+
+                f.configure(
+                    family=fam,
+                    size=sz,
+                    weight="bold" if b else "normal",
+                    slant="italic" if i else "roman",
+                    underline=1 if u else 0,
+                    overstrike=1 if o else 0,
+                )
+            except Exception:
+                continue
