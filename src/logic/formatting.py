@@ -1,9 +1,11 @@
+import re
 import tkinter as tk
 from tkinter import font, colorchooser
 
 
 STYLE_TAG_PREFIX = "pw_fontstyle_"  # internal
 PARA_SPACE_TAG_PREFIX = "pw_para_space_"  # internal
+
 
 class FormatManager:
     def __init__(self, editor, root):
@@ -114,8 +116,10 @@ class FormatManager:
 
     def _checkpoint(self):
         """Creates an undo checkpoint to protect typing history."""
-        try: self.editor.edit_separator()
-        except tk.TclError: pass
+        try:
+            self.editor.edit_separator()
+        except tk.TclError:
+            pass
 
     def toggle_format(self, tag):
         """Toggle a font style tag (bold/italic/underline/overstrike).
@@ -308,16 +312,19 @@ class FormatManager:
                 self._apply_alignment_to_lines(align, line_nos)
 
             self._push_fmt_action(_undo, _redo)
-        except tk.TclError: pass
+        except tk.TclError:
+            pass
         self._checkpoint()
 
     def toggle_list(self):
         """Toggle bullets for the current line or selected lines.
 
-        - If all selected lines are already bulleted, remove bullets.
+        - If all selected (non-empty) lines are already bulleted, remove bullets.
         - Otherwise, add bullets (preserving any existing indentation).
+        - When adding bullets, strip an existing numbered prefix (e.g., "1. ").
         """
         bullet = "• "
+        num_re = re.compile(r"^(?P<num>\d+)\.\s+")
         self._checkpoint()
 
         try:
@@ -337,24 +344,27 @@ class FormatManager:
                 indent = 0
                 while indent < len(txt) and txt[indent] in (" ", "\t"):
                     indent += 1
-                return ls, le, txt, indent
+                tail = txt[indent:]
+                is_b = tail.startswith(bullet)
+                m = num_re.match(tail)
+                num_len = len(m.group(0)) if m else 0
+                return ls, le, txt, indent, is_b, num_len
 
             # Determine whether we should add or remove bullets.
             relevant = []
             all_bulleted = True
             for ln in line_nos:
-                ls, le, txt, indent = _line_info(ln)
+                ls, le, txt, indent, is_b, num_len = _line_info(ln)
                 if txt.strip() == "":
                     # ignore empty lines for the toggle decision
-                    relevant.append((ls, le, txt, indent, False))
+                    relevant.append((ls, le, txt, indent, is_b, num_len))
                     continue
-                is_b = txt[indent:].startswith(bullet)
-                relevant.append((ls, le, txt, indent, is_b))
+                relevant.append((ls, le, txt, indent, is_b, num_len))
                 if not is_b:
                     all_bulleted = False
 
             # Apply
-            for ls, le, txt, indent, is_b in reversed(relevant):
+            for ls, le, txt, indent, is_b, num_len in reversed(relevant):
                 # reverse so index math doesn't shift earlier lines
                 insert_at = f"{ls}+{indent}c"
                 if all_bulleted:
@@ -362,45 +372,166 @@ class FormatManager:
                         self.editor.delete(insert_at, f"{insert_at}+{len(bullet)}c")
                 else:
                     if txt.strip() != "" and not is_b:
+                        # Convert numbered list items into bullets when toggling.
+                        if num_len:
+                            self.editor.delete(insert_at, f"{insert_at}+{num_len}c")
                         self.editor.insert(insert_at, bullet)
         except tk.TclError:
             pass
 
         self._checkpoint()
 
-    def handle_return_key(self, _evt=None):
-        """Continue bullet lists on Enter.
+    def toggle_numbered_list(self):
+        """Toggle numbered list for the current line or selected lines.
 
-        If the current line is a bullet item, Enter inserts a new bullet.
-        If the current line is an *empty* bullet item (just the bullet), Enter
-        exits the list by removing the bullet.
+        - If all selected (non-empty) lines are already numbered, remove numbering.
+        - Otherwise, add numbering starting at 1 (skipping empty lines).
+        - When adding numbering, strip an existing bullet prefix ("• ").
         """
         bullet = "• "
+        num_re = re.compile(r"^(?P<num>\d+)\.\s+")
+        self._checkpoint()
+
+        try:
+            if self.editor.tag_ranges("sel"):
+                start, end = self.editor.index("sel.first"), self.editor.index("sel.last")
+            else:
+                start = self.editor.index("insert linestart")
+                end = self.editor.index("insert lineend")
+
+            line_nos = list(self._each_line_in_range(start, end))
+
+            items = []  # (ls, txt, indent, is_num, num_len, is_bullet)
+            all_numbered = True
+
+            for ln in line_nos:
+                ls = f"{ln}.0"
+                le = f"{ln}.0 lineend"
+                txt = self.editor.get(ls, le)
+
+                indent = 0
+                while indent < len(txt) and txt[indent] in (" ", "\t"):
+                    indent += 1
+
+                if txt.strip() == "":
+                    items.append((ls, txt, indent, False, 0, False))
+                    continue
+
+                tail = txt[indent:]
+                m = num_re.match(tail)
+                is_num = bool(m)
+                num_len = len(m.group(0)) if m else 0
+                is_b = tail.startswith(bullet)
+                items.append((ls, txt, indent, is_num, num_len, is_b))
+
+                if not is_num:
+                    all_numbered = False
+
+            if all_numbered:
+                # Remove numbering.
+                for ls, txt, indent, is_num, num_len, is_b in reversed(items):
+                    if txt.strip() == "" or not is_num:
+                        continue
+                    at = f"{ls}+{indent}c"
+                    self.editor.delete(at, f"{at}+{num_len}c")
+                return
+
+            # Add numbering sequentially.
+            n = 1
+            for ls, txt, indent, is_num, num_len, is_b in reversed(items):
+                if txt.strip() == "":
+                    continue
+                # We build in reverse, so compute number by counting later; easiest is two-pass.
+
+            # Two-pass for stable numbering order
+            numbers_by_ls = {}
+            n = 1
+            for ls, txt, indent, is_num, num_len, is_b in items:
+                if txt.strip() == "":
+                    continue
+                numbers_by_ls[ls] = n
+                n += 1
+
+            for ls, txt, indent, is_num, num_len, is_b in reversed(items):
+                if txt.strip() == "":
+                    continue
+
+                at = f"{ls}+{indent}c"
+
+                # Strip bullet/number prefixes before applying numbering.
+                if is_b:
+                    self.editor.delete(at, f"{at}+{len(bullet)}c")
+                if is_num and num_len:
+                    self.editor.delete(at, f"{at}+{num_len}c")
+
+                self.editor.insert(at, f"{numbers_by_ls[ls]}. ")
+
+        except tk.TclError:
+            pass
+        finally:
+            self._checkpoint()
+
+    def handle_return_key(self, _evt=None):
+        """Continue bullet and numbered lists on Enter.
+
+        Bullets:
+        - If the current line is a bullet item, Enter inserts a new bullet.
+        - If the current line is an *empty* bullet item (just the bullet), Enter
+          exits the list by removing the bullet.
+
+        Numbered:
+        - If the current line is numbered (e.g., "3. "), Enter inserts the next
+          number.
+        - If the current line is an *empty* numbered item, Enter exits the list.
+        """
+        bullet = "• "
+        num_re = re.compile(r"^(?P<num>\d+)\.\s+")
+
         try:
             line_start = self.editor.index("insert linestart")
             line_end = self.editor.index("insert lineend")
             line_text = self.editor.get(line_start, line_end)
 
-            # Compute indentation
+            # Preserve indentation (tabs/spaces exactly)
             indent = 0
             while indent < len(line_text) and line_text[indent] in (" ", "\t"):
                 indent += 1
+            indent_str = line_text[:indent]
+            tail = line_text[indent:]
 
-            if not line_text[indent:].startswith(bullet):
-                return None
-
-            after_bullet = line_text[indent + len(bullet):]
             insert_pos = self.editor.index("insert")
 
-            # If line is just an empty bullet, remove bullet and insert newline.
-            if after_bullet.strip() == "" and self.editor.compare(insert_pos, ">=", line_end):
-                self.editor.delete(f"{line_start}+{indent}c", f"{line_start}+{indent + len(bullet)}c")
-                self.editor.insert("insert", "\n")
+            # Bullet continuation
+            if tail.startswith(bullet):
+                after_prefix = tail[len(bullet):]
+
+                # If line is just an empty bullet, remove bullet and insert newline.
+                if after_prefix.strip() == "" and self.editor.compare(insert_pos, ">=", line_end):
+                    at = f"{line_start}+{indent}c"
+                    self.editor.delete(at, f"{at}+{len(bullet)}c")
+                    self.editor.insert("insert", "\n")
+                    return "break"
+
+                self.editor.insert("insert", "\n" + indent_str + bullet)
                 return "break"
 
-            # Normal bullet continuation
-            self.editor.insert("insert", "\n" + (" " * indent) + bullet)
-            return "break"
+            # Numbered continuation
+            m = num_re.match(tail)
+            if m:
+                prefix_len = len(m.group(0))
+                cur_num = int(m.group("num"))
+                after_prefix = tail[prefix_len:]
+
+                if after_prefix.strip() == "" and self.editor.compare(insert_pos, ">=", line_end):
+                    at = f"{line_start}+{indent}c"
+                    self.editor.delete(at, f"{at}+{prefix_len}c")
+                    self.editor.insert("insert", "\n")
+                    return "break"
+
+                self.editor.insert("insert", "\n" + indent_str + f"{cur_num + 1}. ")
+                return "break"
+
+            return None
         except tk.TclError:
             return None
 
@@ -520,7 +651,8 @@ class FormatManager:
 
     def update_font_visuals(self):
         size = int((self.default_size * self.zoom_level) / 100)
-        if size < 1: size = 1
+        if size < 1:
+            size = 1
         pad = int(50 * (self.zoom_level / 100))
         self.editor.configure(font=(self.default_font, size))
         self.editor.configure(padx=pad, pady=pad)
