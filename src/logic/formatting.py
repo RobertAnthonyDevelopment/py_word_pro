@@ -627,9 +627,16 @@ class FormatManager:
         except Exception:
             line_px = 14
 
-        # spacing2 is extra space *between* display lines.
+        # Tk Text widget spacing behavior:
+        # - spacing2: extra space between *wrapped display lines* of the same logical line
+        # - spacing3: extra space after each logical line (i.e., after every newline)
+        #
+        # Your editor uses wrap=tk.WORD, but users typically insert explicit newlines.
+        # If we only set spacing2, line spacing looks like it "does nothing" unless a
+        # paragraph wraps. Setting spacing3 as well makes spacing visible for normal
+        # newline-separated lines *and* for wrapped lines.
         extra = max(0, int(round(line_px * max(0.0, val - 1.0))))
-        self.editor.configure(spacing1=0, spacing2=extra, spacing3=0)
+        self.editor.configure(spacing1=0, spacing2=extra, spacing3=extra)
 
         self._checkpoint()
 
