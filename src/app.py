@@ -77,7 +77,11 @@ class App:
             'align_l': lambda: self.formatter.set_alignment('left'),
             'align_c': lambda: self.formatter.set_alignment('center'),
             'align_r': lambda: self.formatter.set_alignment('right'),
+
+            # Lists
             'list': self.formatter.toggle_list,
+            'num_list': self.formatter.toggle_numbered_list,
+
             'color': self.formatter.pick_text_color,
             'highlight': self.formatter.apply_highlight,
             'clear_fmt': self.formatter.clear_formatting,
@@ -95,11 +99,11 @@ class App:
             'pdf': self.file_mgr.export_pdf,
             'select_all': self.tools.select_all,
 
-            # existing placeholders (leave if you haven’t implemented yet)
-            'spell': lambda: None,
-            'tts': lambda: None,
+            # Review (now wired)
+            'spell': self.processor.run_spell_check,
+            'tts': self.processor.read_aloud,
 
-            # ✅ View tab fixes
+            # View tab
             'pg_color': self.pick_paper_color,
             'theme': self.toggle_theme,
             'focus': self.toggle_focus_mode,
@@ -122,7 +126,7 @@ class App:
             self._apply_focus_state(True)
 
     # -----------------------------
-    # View Tab Features (FIXED)
+    # View Tab Features
     # -----------------------------
 
     def toggle_theme(self):
@@ -255,7 +259,7 @@ class App:
                 pass
 
     # -----------------------------
-    # Undo/Redo (your safe versions)
+    # Undo/Redo (safe versions)
     # -----------------------------
 
     def safe_undo(self):
@@ -309,3 +313,7 @@ class App:
                 pass
 
         self.editor.bind("<<Modified>>", _on_modified, add="+")
+
+        # List continuation (bullets + numbering)
+        self.editor.bind("<Return>", self.formatter.handle_return_key, add="+")
+
