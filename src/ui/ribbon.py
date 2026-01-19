@@ -97,6 +97,10 @@ class Ribbon(tk.Frame):
         tk.Button(g_para, text="≡C", command=self.callbacks['align_c']).pack(side=tk.LEFT, fill=tk.Y)
         tk.Button(g_para, text="≡R", command=self.callbacks['align_r']).pack(side=tk.LEFT, fill=tk.Y)
 
+        # Lists (bullets + numbering)
+        tk.Button(g_para, text="• List", command=self.callbacks['list']).pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
+        tk.Button(g_para, text="1. List", command=self.callbacks['num_list']).pack(side=tk.LEFT, fill=tk.Y)
+
         f_space = tk.Frame(g_para, bg=self.colors["ribbon"])
         f_space.pack(side=tk.LEFT, padx=5)
         tk.Label(f_space, text="Spacing", font=("Arial", 8), bg=self.colors["ribbon"]).pack(side=tk.TOP)
