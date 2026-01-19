@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import messagebox, colorchooser
-
 from src.config import ConfigManager, THEME, APP_NAME, VERSION
 from src.ui.ribbon import Ribbon
 from src.ui.workspace import Workspace
