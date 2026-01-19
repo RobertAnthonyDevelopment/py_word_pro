@@ -316,4 +316,3 @@ class App:
 
         # List continuation (bullets + numbering)
         self.editor.bind("<Return>", self.formatter.handle_return_key, add="+")
-
