@@ -1,6 +1,10 @@
 import tkinter as tk
 from tkinter import font, colorchooser
 
+
+STYLE_TAG_PREFIX = "pw_fontstyle_"  # internal
+PARA_SPACE_TAG_PREFIX = "pw_para_space_"  # internal
+
 class FormatManager:
     def __init__(self, editor, root):
         self.editor = editor
@@ -8,6 +12,13 @@ class FormatManager:
         self.zoom_level = 100
         self.default_font = "Calibri"
         self.default_size = 11
+
+        # Keep references to any dynamically created Tk Font objects used in
+        # tag configurations so they don't get garbage collected.
+        self._style_fonts = {}  # tag_name -> tkinter.font.Font
+
+        # Current paragraph line spacing multiplier (1.0 = single spacing)
+        self._line_spacing = 1.0
 
         # Tk's built-in Text undo stack does not reliably capture tag-based
         # formatting changes (e.g., alignment). We therefore keep a small,
@@ -107,41 +118,151 @@ class FormatManager:
         except tk.TclError: pass
 
     def toggle_format(self, tag):
+        """Toggle a font style tag (bold/italic/underline/overstrike).
+
+        NOTE: The old approach used *separate* Tk tags for each style and
+        reconfigured each tag with a full font descriptor. That caused styles
+        to clobber each other (e.g., bold -> italic would reset weight).
+
+        The new approach uses a single *combined* style tag for each unique
+        combination of (bold, italic, underline, overstrike), so toggling one
+        style preserves the others.
+        """
         self._note_format_activity()
-        self._checkpoint() # Cut rope
+        self._checkpoint()
+
+        if tag not in {"bold", "italic", "underline", "overstrike"}:
+            return
+
         try:
-            if self.editor.tag_ranges("sel"):
-                # Snapshot current state (within selection) for undo.
-                sel_start, sel_end = self.editor.index("sel.first"), self.editor.index("sel.last")
-                before = self._snapshot_tag_ranges(tag, sel_start, sel_end)
+            if not self.editor.tag_ranges("sel"):
+                # No selection: apply to the current word/line character so the
+                # user sees an immediate effect. This also makes subsequent
+                # typing inherit the style in most cases (Tk copies tags from
+                # the char to the left of the insert mark).
+                start = self.editor.index("insert")
+                end = self.editor.index("insert +1c")
+                if self.editor.compare(end, ">", "end-1c"):
+                    end = self.editor.index("end-1c")
+                if self.editor.compare(start, "==", end):
+                    return
+            else:
+                start, end = self.editor.index("sel.first"), self.editor.index("sel.last")
 
-                current = self.editor.tag_names("sel.first")
-                if tag in current:
-                    self.editor.tag_remove(tag, "sel.first", "sel.last")
-                else:
-                    self.editor.tag_add(tag, "sel.first", "sel.last")
-                    self._configure_tag(tag)
+            before = self._snapshot_style_ranges(start, end)
 
-                after = self._snapshot_tag_ranges(tag, sel_start, sel_end)
+            # Determine current style flags at start.
+            b, i, u, o = self._get_style_flags_at(start)
+            if tag == "bold":
+                b = not b
+            elif tag == "italic":
+                i = not i
+            elif tag == "underline":
+                u = not u
+            elif tag == "overstrike":
+                o = not o
 
-                def _restore(ranges):
-                    # Remove then restore the exact prior tagged segments.
-                    self.editor.tag_remove(tag, sel_start, sel_end)
-                    for a, b in ranges:
-                        self.editor.tag_add(tag, a, b)
-                    self._configure_tag(tag)
+            new_style_tag = self._ensure_style_tag(b=b, italic=i, underline=u, overstrike=o)
 
-                self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
-        except tk.TclError: pass
-        self._checkpoint() # Cut rope again
+            # Replace any existing style tags with the new combined tag.
+            self._remove_style_tags_in_range(start, end)
+            self.editor.tag_add(new_style_tag, start, end)
 
-    def _configure_tag(self, tag):
-        f = font.Font(font=self.editor.cget("font"))
-        if tag == "bold": f.configure(weight="bold")
-        if tag == "italic": f.configure(slant="italic")
-        if tag == "underline": f.configure(underline=True)
-        if tag == "overstrike": f.configure(overstrike=True)
-        self.editor.tag_configure(tag, font=f)
+            after = self._snapshot_style_ranges(start, end)
+
+            def _restore(snapshot):
+                self._remove_style_tags_in_range(start, end)
+                for tname, ranges in snapshot.items():
+                    for a, b2 in ranges:
+                        self.editor.tag_add(tname, a, b2)
+
+            self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+        except tk.TclError:
+            pass
+
+        self._checkpoint()
+
+    def _style_tag_name(self, *, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
+        bits = (
+            "b1" if b else "b0",
+            "i1" if italic else "i0",
+            "u1" if underline else "u0",
+            "o1" if overstrike else "o0",
+        )
+        return STYLE_TAG_PREFIX + "_".join(bits)
+
+    def _ensure_style_tag(self, *, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
+        """Create (if needed) and return a combined-style tag name."""
+        name = self._style_tag_name(b=b, italic=italic, underline=underline, overstrike=overstrike)
+        if name in self._style_fonts:
+            return name
+
+        base = font.Font(font=self.editor.cget("font"))
+        f = font.Font(
+            family=base.cget("family"),
+            size=base.cget("size"),
+            weight="bold" if b else "normal",
+            slant="italic" if italic else "roman",
+            underline=1 if underline else 0,
+            overstrike=1 if overstrike else 0,
+        )
+        self._style_fonts[name] = f
+        self.editor.tag_configure(name, font=f)
+        return name
+
+    def _get_style_flags_at(self, index: str):
+        """Return (bold, italic, underline, overstrike) for the first style tag at index."""
+        try:
+            tags = self.editor.tag_names(index)
+        except tk.TclError:
+            return False, False, False, False
+
+        for t in tags:
+            if not t.startswith(STYLE_TAG_PREFIX):
+                continue
+            # Parse bits from the tag name.
+            parts = t[len(STYLE_TAG_PREFIX):].split("_")
+            bits = {p[:1]: p[1:] for p in parts if len(p) == 2}
+            return (
+                bits.get("b") == "1",
+                bits.get("i") == "1",
+                bits.get("u") == "1",
+                bits.get("o") == "1",
+            )
+
+        # Fall back to legacy tags if present (older docs/sessions).
+        return (
+            "bold" in tags,
+            "italic" in tags,
+            "underline" in tags,
+            "overstrike" in tags,
+        )
+
+    def _remove_style_tags_in_range(self, start: str, end: str):
+        for t in list(self.editor.tag_names()):
+            if t.startswith(STYLE_TAG_PREFIX):
+                self.editor.tag_remove(t, start, end)
+        # Remove legacy tags too so we don't get mixed behavior.
+        for t in ("bold", "italic", "underline", "overstrike"):
+            try:
+                self.editor.tag_remove(t, start, end)
+            except tk.TclError:
+                pass
+
+    def _snapshot_style_ranges(self, start: str, end: str):
+        """Snapshot all combined-style tag ranges intersecting [start, end]."""
+        snap = {}
+        for t in self.editor.tag_names():
+            if t.startswith(STYLE_TAG_PREFIX):
+                ranges = self._snapshot_tag_ranges(t, start, end)
+                if ranges:
+                    snap[t] = ranges
+        # Include legacy tags if they exist.
+        for t in ("bold", "italic", "underline", "overstrike"):
+            ranges = self._snapshot_tag_ranges(t, start, end)
+            if ranges:
+                snap[t] = ranges
+        return snap
 
     def _snapshot_tag_ranges(self, tag, start, end):
         """Return a list of (start, end) ranges for `tag` intersecting [start, end]."""
@@ -191,16 +312,97 @@ class FormatManager:
         self._checkpoint()
 
     def toggle_list(self):
+        """Toggle bullets for the current line or selected lines.
+
+        - If all selected lines are already bulleted, remove bullets.
+        - Otherwise, add bullets (preserving any existing indentation).
+        """
+        bullet = "• "
         self._checkpoint()
+
         try:
-            start = "insert linestart"
-            bullet = "• "
-            if self.editor.get(start, f"{start}+2c") == bullet:
-                self.editor.delete(start, f"{start}+2c")
+            if self.editor.tag_ranges("sel"):
+                start, end = self.editor.index("sel.first"), self.editor.index("sel.last")
             else:
-                self.editor.insert(start, bullet)
-        except tk.TclError: pass
+                start = self.editor.index("insert linestart")
+                end = self.editor.index("insert lineend")
+
+            line_nos = list(self._each_line_in_range(start, end))
+
+            def _line_info(ln: int):
+                ls = f"{ln}.0"
+                le = f"{ln}.0 lineend"
+                txt = self.editor.get(ls, le)
+                # preserve indentation
+                indent = 0
+                while indent < len(txt) and txt[indent] in (" ", "\t"):
+                    indent += 1
+                return ls, le, txt, indent
+
+            # Determine whether we should add or remove bullets.
+            relevant = []
+            all_bulleted = True
+            for ln in line_nos:
+                ls, le, txt, indent = _line_info(ln)
+                if txt.strip() == "":
+                    # ignore empty lines for the toggle decision
+                    relevant.append((ls, le, txt, indent, False))
+                    continue
+                is_b = txt[indent:].startswith(bullet)
+                relevant.append((ls, le, txt, indent, is_b))
+                if not is_b:
+                    all_bulleted = False
+
+            # Apply
+            for ls, le, txt, indent, is_b in reversed(relevant):
+                # reverse so index math doesn't shift earlier lines
+                insert_at = f"{ls}+{indent}c"
+                if all_bulleted:
+                    if is_b:
+                        self.editor.delete(insert_at, f"{insert_at}+{len(bullet)}c")
+                else:
+                    if txt.strip() != "" and not is_b:
+                        self.editor.insert(insert_at, bullet)
+        except tk.TclError:
+            pass
+
         self._checkpoint()
+
+    def handle_return_key(self, _evt=None):
+        """Continue bullet lists on Enter.
+
+        If the current line is a bullet item, Enter inserts a new bullet.
+        If the current line is an *empty* bullet item (just the bullet), Enter
+        exits the list by removing the bullet.
+        """
+        bullet = "• "
+        try:
+            line_start = self.editor.index("insert linestart")
+            line_end = self.editor.index("insert lineend")
+            line_text = self.editor.get(line_start, line_end)
+
+            # Compute indentation
+            indent = 0
+            while indent < len(line_text) and line_text[indent] in (" ", "\t"):
+                indent += 1
+
+            if not line_text[indent:].startswith(bullet):
+                return None
+
+            after_bullet = line_text[indent + len(bullet):]
+            insert_pos = self.editor.index("insert")
+
+            # If line is just an empty bullet, remove bullet and insert newline.
+            if after_bullet.strip() == "" and self.editor.compare(insert_pos, ">=", line_end):
+                self.editor.delete(f"{line_start}+{indent}c", f"{line_start}+{indent + len(bullet)}c")
+                self.editor.insert("insert", "\n")
+                return "break"
+
+            # Normal bullet continuation
+            self.editor.insert("insert", "\n" + (" " * indent) + bullet)
+            return "break"
+        except tk.TclError:
+            return None
 
     def pick_text_color(self):
         c = colorchooser.askcolor()[1]
@@ -270,11 +472,34 @@ class FormatManager:
         self._checkpoint()
 
     def set_line_spacing(self, val):
+        """Set document line spacing.
+
+        Tk's Text widget uses pixel-based spacing (spacing1/2/3). The previous
+        implementation used fixed pixel values that were too small to notice on
+        many font sizes, which made the feature look "broken".
+
+        We compute spacing based on the current font's line height so values like
+        1.15x / 1.5x / 2.0x are visible and scale with zoom.
+        """
+        self._note_format_activity()
         self._checkpoint()
-        px = 0
-        if val == 1.5: px = 6
-        elif val == 2.0: px = 14
-        self.editor.configure(spacing2=px)
+
+        try:
+            val = float(val)
+        except Exception:
+            val = 1.0
+
+        # Base line height in pixels for the current editor font.
+        try:
+            current_font = font.Font(font=self.editor.cget("font"))
+            line_px = int(current_font.metrics("linespace"))
+        except Exception:
+            line_px = 14
+
+        # spacing2 is extra space *between* display lines.
+        extra = max(0, int(round(line_px * max(0.0, val - 1.0))))
+        self.editor.configure(spacing1=0, spacing2=extra, spacing3=0)
+
         self._checkpoint()
 
     def apply_font_family(self, name):
