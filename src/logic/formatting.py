@@ -314,7 +314,72 @@ class FormatManager:
             pass
 
     def _refresh_style_fonts(self):
-        # Recompute tag font sizes when zoom changes so styled text scales consistently.
+        """Recompute tag font sizes when zoom changes.
+
+        Important: documents can create style tags outside of this manager
+        (e.g., when opening .pwp/.docx). Those tags still need to scale with
+        zoom, so we *discover* any existing combined-style tags in the widget
+        and add them to our caches before resizing.
+        """
+
+        # 1) Discover any STYLE_TAG_PREFIX tags that exist but aren't tracked yet.
+        try:
+            import re as _re
+
+            for t in self.editor.tag_names():
+                if not t.startswith(STYLE_TAG_PREFIX):
+                    continue
+                if t in self._style_fonts:
+                    continue
+
+                try:
+                    fnt_name = self.editor.tag_cget(t, 'font')
+                    if not fnt_name:
+                        continue
+                    fnt_obj = font.nametofont(fnt_name)
+                except Exception:
+                    continue
+
+                # Derive base size @100% zoom from tag name if present.
+                base_sz = None
+                try:
+                    m = _re.search(r"_s(\d+)_", t)
+                    if m:
+                        base_sz = int(m.group(1))
+                except Exception:
+                    base_sz = None
+
+                if base_sz is None:
+                    try:
+                        base_sz = int(round(int(fnt_obj.cget('size')) * 100 / max(1, int(self.zoom_level or 100))))
+                    except Exception:
+                        base_sz = self.default_size
+
+                # Flags from tag name (b1/i1/u1/o1)
+                b = i = u = o = False
+                try:
+                    parts = t[len(STYLE_TAG_PREFIX):].split('_')
+                    bits = {p[:1]: p[1:] for p in parts if len(p) == 2}
+                    b = bits.get('b') == '1'
+                    i = bits.get('i') == '1'
+                    u = bits.get('u') == '1'
+                    o = bits.get('o') == '1'
+                except Exception:
+                    pass
+
+                self._style_fonts[t] = fnt_obj
+                self._style_meta[t] = {
+                    'family': fnt_obj.cget('family'),
+                    'size': base_sz,
+                    'b': b,
+                    'i': i,
+                    'u': u,
+                    'o': o,
+                }
+        except Exception:
+            pass
+
+        # 2) Resize all tracked style fonts based on their base size.
         for t, fnt in list(self._style_fonts.items()):
             meta = self._style_meta.get(t)
             if not meta:
