@@ -1,4 +1,5 @@
 import re
+import hashlib
 import tkinter as tk
 from tkinter import font, colorchooser
 
@@ -18,6 +19,27 @@ class FormatManager:
         # Keep references to any dynamically created Tk Font objects used in
         # tag configurations so they don't get garbage collected.
         self._style_fonts = {}  # tag_name -> tkinter.font.Font
+
+
+        # Metadata for each combined-style tag so per-range size changes don't affect the whole document
+        # and style (bold/italic/etc.) can be preserved across font size/family changes.
+        # tag_name -> {family:str, size:int(base@100%), b:bool, i:bool, u:bool, o:bool}
+        self._style_meta = {}
+
+        # Typing-mode formatting: when user clicks Bold/Italic (or changes size/family)
+        # with NO selection, newly typed characters inherit this spec.
+        #
+        # We implement this by capturing the insert position on KeyPress and, after
+        # Tk inserts text, applying a combined style tag to the newly inserted range.
+        # This makes "click Bold, then type" work reliably (including across lines).
+        self._typing_spec = None
+        self._typing_enabled = False
+
+        try:
+            self.editor.bind('<KeyPress>', self._on_keypress_capture_insert, add=True)
+            self.editor.bind('<<Paste>>', self._on_paste_capture_insert, add=True)
+        except Exception:
+            pass
 
         # Current paragraph line spacing multiplier (1.0 = single spacing)
         self._line_spacing = 1.0
@@ -121,74 +143,232 @@ class FormatManager:
         except tk.TclError:
             pass
 
+    # --- Helpers for combined font-spec tags (family/size + bold/italic/underline/overstrike) ---
+
+    def _scaled_size(self, base_size: int) -> int:
+        # Convert a base font size (at 100% zoom) into the current zoom-scaled size.
+        try:
+            z = int(self.zoom_level) if self.zoom_level else 100
+        except Exception:
+            z = 100
+        sz = int(round(base_size * (z / 100.0)))
+        return max(1, sz)
+
+    def _get_effective_spec_at(self, index: str):
+        # Return the effective (family, base_size, b,i,u,o) at a given index.
+        b, i, u, o = self._get_style_flags_at(index)
+        try:
+            tags = self.editor.tag_names(index)
+        except Exception:
+            tags = ()
+
+        for t in tags:
+            if not t.startswith(STYLE_TAG_PREFIX):
+                continue
+            meta = self._style_meta.get(t)
+            if meta:
+                return {
+                    'family': meta['family'],
+                    'size': meta['size'],
+                    'b': meta['b'],
+                    'i': meta['i'],
+                    'u': meta['u'],
+                    'o': meta['o'],
+                }
+            fnt = self._style_fonts.get(t)
+            if fnt:
+                try:
+                    base_sz = int(round(int(fnt.cget('size')) * 100 / max(1, int(self.zoom_level or 100))))
+                except Exception:
+                    base_sz = self.default_size
+                return {
+                    'family': fnt.cget('family'),
+                    'size': base_sz,
+                    'b': b,
+                    'i': i,
+                    'u': u,
+                    'o': o,
+                }
+
+        # Default (unstyled) spec
+        return {
+            'family': self.default_font,
+            'size': self.default_size,
+            'b': False,
+            'i': False,
+            'u': False,
+            'o': False,
+        }
+
+    def _apply_spec_to_range(self, spec: dict, start: str, end: str):
+        # Remove any existing style tags and apply a single combined tag for this spec.
+        new_tag = self._ensure_style_tag(
+            family=spec['family'],
+            size=int(spec['size']),
+            b=bool(spec['b']),
+            italic=bool(spec['i']),
+            underline=bool(spec['u']),
+            overstrike=bool(spec['o']),
+        )
+        self._remove_style_tags_in_range(start, end)
+        self.editor.tag_add(new_tag, start, end)
+
+    def _is_default_spec(self, spec: dict) -> bool:
+        """Return True if spec is the plain/default font with no styles."""
+        try:
+            return (
+                spec.get('family') == self.default_font
+                and int(spec.get('size')) == int(self.default_size)
+                and not spec.get('b')
+                and not spec.get('i')
+                and not spec.get('u')
+                and not spec.get('o')
+            )
+        except Exception:
+            return False
+
+    def _style_boundaries_in_range(self, start: str, end: str):
+        """Return sorted boundary indices where the effective style may change."""
+        bounds = {self.editor.index(start), self.editor.index(end)}
+        for t in self.editor.tag_names():
+            if not t.startswith(STYLE_TAG_PREFIX):
+                continue
+            for a, b in self._snapshot_tag_ranges(t, start, end):
+                bounds.add(self.editor.index(a))
+                bounds.add(self.editor.index(b))
+
+        def _key(ix: str):
+            ix = self.editor.index(ix)
+            ln, col = ix.split('.')
+            return (int(ln), int(col))
+
+        return sorted(bounds, key=_key)
+
+    def _iter_style_segments(self, start: str, end: str):
+        """Yield (seg_start, seg_end, spec) for each contiguous style segment."""
+        bounds = self._style_boundaries_in_range(start, end)
+        for i in range(len(bounds) - 1):
+            s = bounds[i]
+            e = bounds[i + 1]
+            try:
+                if self.editor.compare(s, '<', e):
+                    yield s, e, self._get_effective_spec_at(s)
+            except tk.TclError:
+                continue
+
+    def _on_keypress_capture_insert(self, evt=None):
+        """Capture the insertion start on KeyPress and style the inserted range.
+
+        This is the key fix for: "I want Bold/Italic selected BEFORE I type".
+
+        Tk inserts text *after* KeyPress handlers run. We therefore record the
+        current insert index and apply the active typing style on the next idle
+        loop once the text has been inserted.
+        """
+        if not self._typing_enabled or not self._typing_spec:
+            return
+
+        try:
+            before = self.editor.index('insert')
+        except tk.TclError:
+            return
+
+        # Apply after Tk has performed the default key action.
+        try:
+            self.editor.after_idle(lambda: self._apply_typing_to_newly_inserted(before))
+        except Exception:
+            pass
+
+    def _on_paste_capture_insert(self, evt=None):
+        """Ensure paste operations also inherit the typing style."""
+        if not self._typing_enabled or not self._typing_spec:
+            return
+        try:
+            before = self.editor.index('insert')
+        except tk.TclError:
+            return
+        try:
+            self.editor.after_idle(lambda: self._apply_typing_to_newly_inserted(before))
+        except Exception:
+            pass
+
+    def _apply_typing_to_newly_inserted(self, before_index: str):
+        """Apply typing style to the range inserted since before_index."""
+        if not self._typing_enabled or not self._typing_spec:
+            return
+        try:
+            after = self.editor.index('insert')
+        except tk.TclError:
+            return
+
+        # Only apply if text was inserted (insert moved forward).
+        try:
+            if not self.editor.compare(after, '>', before_index):
+                return
+        except tk.TclError:
+            return
+
+        try:
+            self._apply_spec_to_range(self._typing_spec, before_index, after)
+        except Exception:
+            pass
+
+    def _refresh_style_fonts(self):
+        # Recompute tag font sizes when zoom changes so styled text scales consistently.
+        for t, fnt in list(self._style_fonts.items()):
+            meta = self._style_meta.get(t)
+            if not meta:
+                continue
+            try:
+                fnt.configure(size=self._scaled_size(int(meta['size'])))
+            except Exception:
+                pass
     def toggle_format(self, tag):
         """Toggle a font style tag (bold/italic/underline/overstrike).
 
-        NOTE: The old approach used *separate* Tk tags for each style and
-        reconfigured each tag with a full font descriptor. That caused styles
-        to clobber each other (e.g., bold -> italic would reset weight).
-
-        The new approach uses a single *combined* style tag for each unique
-        combination of (bold, italic, underline, overstrike), so toggling one
-        style preserves the others.
+        Fixes two common issues:
+        - Bold/Italic should work with NO selection (affects subsequent typing).
+        - Toggling one style should not wipe the others.
         """
         self._note_format_activity()
         self._checkpoint()
 
-        if tag not in {"bold", "italic", "underline", "overstrike"}:
+        if tag not in {'bold','italic','underline','overstrike'}:
             return
 
         try:
-            has_sel = bool(self.editor.tag_ranges("sel"))
+            has_sel = bool(self.editor.tag_ranges('sel'))
 
-            # --------------------------------------------
-            # Selection mode: preserve existing combinations
-            # --------------------------------------------
             if has_sel:
-                start, end = self.editor.index("sel.first"), self.editor.index("sel.last")
+                start, end = self.editor.index('sel.first'), self.editor.index('sel.last')
                 before = self._snapshot_style_ranges(start, end)
 
-                # Build segments where the existing style flags are uniform.
-                segments = self._style_segments(start, end)
+                # Split the selection into contiguous style segments so we don't
+                # wipe out mixed formatting. Each segment toggles independently.
+                segments = list(self._iter_style_segments(start, end))
 
-                # Toggle behavior (Word-like):
-                # - If *all* selected segments already have the style -> remove it
-                # - Otherwise -> apply it everywhere
-                idx = {"bold": 0, "italic": 1, "underline": 2, "overstrike": 3}[tag]
-                all_have = True
-                for a, b, flags in segments:
-                    if not self.editor.compare(a, "<", b):
-                        continue
-                    if not flags[idx]:
-                        all_have = False
-                        break
-                new_val = not all_have
-
-                # Remove all style tags in the range, then re-apply per-segment
-                # so we preserve other flags already present.
+                # Clear existing style tags once, then re-apply combined tags.
                 self._remove_style_tags_in_range(start, end)
+                for s, e, spec in segments:
+                    spec = dict(spec)
+                    if tag == 'bold':
+                        spec['b'] = not spec['b']
+                    elif tag == 'italic':
+                        spec['i'] = not spec['i']
+                    elif tag == 'underline':
+                        spec['u'] = not spec['u']
+                    elif tag == 'overstrike':
+                        spec['o'] = not spec['o']
 
-                for a, b, flags in segments:
-                    if not self.editor.compare(a, "<", b):
-                        continue
-
-                    b0, i0, u0, o0 = flags
-                    if tag == "bold":
-                        b0 = new_val
-                    elif tag == "italic":
-                        i0 = new_val
-                    elif tag == "underline":
-                        u0 = new_val
-                    elif tag == "overstrike":
-                        o0 = new_val
-
-                    # If no styles remain, leave it unstyled.
-                    if not (b0 or i0 or u0 or o0):
-                        continue
-
-                    tname = self._ensure_style_tag(b=b0, italic=i0, underline=u0, overstrike=o0)
-                    self.editor.tag_add(tname, a, b)
-
+                    tname = self._ensure_style_tag(
+                        family=spec['family'],
+                        size=int(spec['size']),
+                        b=bool(spec['b']),
+                        italic=bool(spec['i']),
+                        underline=bool(spec['u']),
+                        overstrike=bool(spec['o']),
+                    )
+                    self.editor.tag_add(tname, s, e)
                 after = self._snapshot_style_ranges(start, end)
 
                 def _restore(snapshot):
@@ -199,135 +379,84 @@ class FormatManager:
 
                 self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
 
-            # --------------------------------------------
-            # Cursor mode: toggle at insertion point
-            # --------------------------------------------
             else:
-                # Tk Text inherits tags from the character *to the left* of the
-                # insert mark. Tagging that character makes newly typed text
-                # inherit the formatting (much more reliable than insert+1c).
-                insert = self.editor.index("insert")
-                if self.editor.compare(insert, ">", "1.0"):
-                    start = self.editor.index("insert -1c")
-                    end = insert
+                # No selection: enable typing-mode formatting.
+                self._typing_enabled = True
+                # Use the character to the left of the cursor as the current context if possible.
+                try:
+                    left_idx = self.editor.index('insert-1c')
+                    if self.editor.compare(left_idx, '<', '1.0'):
+                        raise ValueError
+                    base = self._get_effective_spec_at(left_idx)
+                except Exception:
+                    base = {
+                        'family': self.default_font,
+                        'size': self.default_size,
+                        'b': False,
+                        'i': False,
+                        'u': False,
+                        'o': False,
+                    }
+
+                # If we already have a typing spec, start from it.
+                if self._typing_spec:
+                    base = dict(self._typing_spec)
+
+                if tag == 'bold':
+                    base['b'] = not base['b']
+                elif tag == 'italic':
+                    base['i'] = not base['i']
+                elif tag == 'underline':
+                    base['u'] = not base['u']
+                elif tag == 'overstrike':
+                    base['o'] = not base['o']
+
+                # If the resulting spec is the plain default, disable typing-mode
+                # so we don't add unnecessary tags while typing.
+                if self._is_default_spec(base):
+                    self._typing_spec = None
+                    self._typing_enabled = False
                 else:
-                    # At the very start of the document there is no "left" char.
-                    # Fall back to styling the next character if it exists.
-                    start = insert
-                    end = self.editor.index("insert +1c")
-                    if self.editor.compare(end, ">", "end-1c"):
-                        end = self.editor.index("end-1c")
-                    if self.editor.compare(start, "==", end):
-                        return
-
-                before = self._snapshot_style_ranges(start, end)
-                b0, i0, u0, o0 = self._get_style_flags_at(start)
-
-                if tag == "bold":
-                    b0 = not b0
-                elif tag == "italic":
-                    i0 = not i0
-                elif tag == "underline":
-                    u0 = not u0
-                elif tag == "overstrike":
-                    o0 = not o0
-
-                # Apply new combo.
-                self._remove_style_tags_in_range(start, end)
-                if b0 or i0 or u0 or o0:
-                    tname = self._ensure_style_tag(b=b0, italic=i0, underline=u0, overstrike=o0)
-                    self.editor.tag_add(tname, start, end)
-
-                after = self._snapshot_style_ranges(start, end)
-
-                def _restore(snapshot):
-                    self._remove_style_tags_in_range(start, end)
-                    for tname, ranges in snapshot.items():
-                        for a, b2 in ranges:
-                            self.editor.tag_add(tname, a, b2)
-
-                self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+                    self._typing_spec = base
 
         except tk.TclError:
             pass
 
         self._checkpoint()
-
-    def _style_segments(self, start: str, end: str):
-        """Return a list of (seg_start, seg_end, flags) that cover [start, end].
-
-        Each segment has uniform (bold, italic, underline, overstrike) flags.
-        """
-
-        def _idx_tuple(idx: str):
-            ln, col = idx.split(".")
-            return int(ln), int(col)
-
-        start = self.editor.index(start)
-        end = self.editor.index(end)
-
-        boundaries = {start, end}
-
-        # Collect boundaries from every style-tag range that overlaps [start, end].
-        style_tags = [t for t in self.editor.tag_names() if t.startswith(STYLE_TAG_PREFIX)]
-        # Include legacy tags too so old documents still behave.
-        style_tags += [t for t in ("bold", "italic", "underline", "overstrike") if t in self.editor.tag_names()]
-
-        for t in style_tags:
-            try:
-                ranges = self.editor.tag_ranges(t)
-            except tk.TclError:
-                continue
-            for i in range(0, len(ranges), 2):
-                a = self.editor.index(ranges[i])
-                b = self.editor.index(ranges[i + 1])
-                if self.editor.compare(b, "<=", start) or self.editor.compare(a, ">=", end):
-                    continue
-                # Clamp to selection.
-                if self.editor.compare(a, "<", start):
-                    a = start
-                if self.editor.compare(b, ">", end):
-                    b = end
-                boundaries.add(a)
-                boundaries.add(b)
-
-        ordered = sorted(boundaries, key=_idx_tuple)
-        segs = []
-        for i in range(len(ordered) - 1):
-            a, b = ordered[i], ordered[i + 1]
-            if not self.editor.compare(a, "<", b):
-                continue
-            segs.append((a, b, self._get_style_flags_at(a)))
-        # If something went wrong, fall back to one segment.
-        if not segs:
-            segs = [(start, end, self._get_style_flags_at(start))]
-        return segs
-
-    def _style_tag_name(self, *, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
+    def _style_tag_name(self, *, family: str, size: int, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
+        # Include family+base-size in the tag name so different size runs don't collide.
+        safe = re.sub(r'[^A-Za-z0-9]+', '-', family).strip('-') or 'font'
+        fam_hash = hashlib.md5(family.encode('utf-8')).hexdigest()[:6]
         bits = (
-            "b1" if b else "b0",
-            "i1" if italic else "i0",
-            "u1" if underline else "u0",
-            "o1" if overstrike else "o0",
+            'b1' if b else 'b0',
+            'i1' if italic else 'i0',
+            'u1' if underline else 'u0',
+            'o1' if overstrike else 'o0',
         )
-        return STYLE_TAG_PREFIX + "_".join(bits)
-
-    def _ensure_style_tag(self, *, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
-        """Create (if needed) and return a combined-style tag name."""
-        name = self._style_tag_name(b=b, italic=italic, underline=underline, overstrike=overstrike)
+        return f"{STYLE_TAG_PREFIX}f{safe}{fam_hash}_s{int(size)}_" + '_'.join(bits)
+    def _ensure_style_tag(self, *, family: str, size: int, b: bool, italic: bool, underline: bool, overstrike: bool) -> str:
+        # Create (if needed) and return a combined-style tag name.
+        name = self._style_tag_name(family=family, size=size, b=b, italic=italic, underline=underline, overstrike=overstrike)
         if name in self._style_fonts:
             return name
 
-        base = font.Font(font=self.editor.cget("font"))
         f = font.Font(
-            family=base.cget("family"),
-            size=base.cget("size"),
-            weight="bold" if b else "normal",
-            slant="italic" if italic else "roman",
+            family=family,
+            size=self._scaled_size(int(size)),
+            weight='bold' if b else 'normal',
+            slant='italic' if italic else 'roman',
             underline=1 if underline else 0,
             overstrike=1 if overstrike else 0,
         )
         self._style_fonts[name] = f
+        self._style_meta[name] = {
+            'family': family,
+            'size': int(size),
+            'b': bool(b),
+            'i': bool(italic),
+            'u': bool(underline),
+            'o': bool(overstrike),
+        }
         self.editor.tag_configure(name, font=f)
         return name
 
@@ -756,17 +885,108 @@ class FormatManager:
         self.editor.configure(spacing1=0, spacing2=extra, spacing3=extra)
 
         self._checkpoint()
-
     def apply_font_family(self, name):
+        self._note_format_activity()
         self._checkpoint()
+        try:
+            if self.editor.tag_ranges('sel'):
+                start, end = self.editor.index('sel.first'), self.editor.index('sel.last')
+                before = self._snapshot_style_ranges(start, end)
+                segments = list(self._iter_style_segments(start, end))
+                self._remove_style_tags_in_range(start, end)
+                for s, e, spec in segments:
+                    spec = dict(spec)
+                    spec['family'] = name
+                    tname = self._ensure_style_tag(
+                        family=spec['family'],
+                        size=int(spec['size']),
+                        b=bool(spec['b']),
+                        italic=bool(spec['i']),
+                        underline=bool(spec['u']),
+                        overstrike=bool(spec['o']),
+                    )
+                    self.editor.tag_add(tname, s, e)
+                after = self._snapshot_style_ranges(start, end)
+
+                def _restore(snapshot):
+                    self._remove_style_tags_in_range(start, end)
+                    for tname, ranges in snapshot.items():
+                        for a, b2 in ranges:
+                            self.editor.tag_add(tname, a, b2)
+
+                self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+                return
+        except Exception:
+            pass
+
+        # No selection -> set typing/default font for future typing (do NOT resize existing text)
         self.default_font = name
-        self.update_font_visuals()
+        # enable typing mode so the next characters inherit the font
+        base = dict(self._typing_spec) if self._typing_spec else {
+            'family': self.default_font,
+            'size': self.default_size,
+            'b': False,
+            'i': False,
+            'u': False,
+            'o': False,
+        }
+        base['family'] = name
+        self._typing_spec = base
+        self._typing_enabled = True
         self._checkpoint()
 
     def apply_font_size(self, size):
+        self._note_format_activity()
         self._checkpoint()
-        self.default_size = int(size)
-        self.update_font_visuals()
+        try:
+            size = int(size)
+        except Exception:
+            size = self.default_size
+
+        try:
+            if self.editor.tag_ranges('sel'):
+                start, end = self.editor.index('sel.first'), self.editor.index('sel.last')
+                before = self._snapshot_style_ranges(start, end)
+                segments = list(self._iter_style_segments(start, end))
+                self._remove_style_tags_in_range(start, end)
+                for s, e, spec in segments:
+                    spec = dict(spec)
+                    spec['size'] = size
+                    tname = self._ensure_style_tag(
+                        family=spec['family'],
+                        size=int(spec['size']),
+                        b=bool(spec['b']),
+                        italic=bool(spec['i']),
+                        underline=bool(spec['u']),
+                        overstrike=bool(spec['o']),
+                    )
+                    self.editor.tag_add(tname, s, e)
+                after = self._snapshot_style_ranges(start, end)
+
+                def _restore(snapshot):
+                    self._remove_style_tags_in_range(start, end)
+                    for tname, ranges in snapshot.items():
+                        for a, b2 in ranges:
+                            self.editor.tag_add(tname, a, b2)
+
+                self._push_fmt_action(lambda: _restore(before), lambda: _restore(after))
+                return
+        except Exception:
+            pass
+
+        # No selection -> set typing/default size for future typing (do NOT resize existing text)
+        self.default_size = size
+        base = dict(self._typing_spec) if self._typing_spec else {
+            'family': self.default_font,
+            'size': self.default_size,
+            'b': False,
+            'i': False,
+            'u': False,
+            'o': False,
+        }
+        base['size'] = size
+        self._typing_spec = base
+        self._typing_enabled = True
         self._checkpoint()
 
     def set_zoom(self, val):
@@ -780,39 +1000,7 @@ class FormatManager:
         pad = int(50 * (self.zoom_level / 100))
         self.editor.configure(font=(self.default_font, size))
         self.editor.configure(padx=pad, pady=pad)
-
-        # Any combined-style tags store their own Font objects. If the base
-        # editor font changes (zoom/family/size), refresh those fonts so
-        # bold/italic combos stay visually consistent.
-        self._refresh_style_fonts()
-
-    def _refresh_style_fonts(self):
-        """Update already-created combined-style fonts to match current base font."""
         try:
-            base = font.Font(font=self.editor.cget("font"))
-            fam = base.cget("family")
-            sz = base.cget("size")
+            self._refresh_style_fonts()
         except Exception:
-            return
-
-        for tname, f in list(self._style_fonts.items()):
-            try:
-                # Parse bits out of the tag name.
-                parts = tname[len(STYLE_TAG_PREFIX):].split("_")
-                bits = {p[:1]: p[1:] for p in parts if len(p) == 2}
-
-                b = bits.get("b") == "1"
-                i = bits.get("i") == "1"
-                u = bits.get("u") == "1"
-                o = bits.get("o") == "1"
-
-                f.configure(
-                    family=fam,
-                    size=sz,
-                    weight="bold" if b else "normal",
-                    slant="italic" if i else "roman",
-                    underline=1 if u else 0,
-                    overstrike=1 if o else 0,
-                )
-            except Exception:
-                continue
+            pass
