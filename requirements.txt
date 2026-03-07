@@ -1,0 +1,6 @@
+Pillow
+python-docx
+pymupdf
+pyttsx3
+fpdf
+pyspellchecker
