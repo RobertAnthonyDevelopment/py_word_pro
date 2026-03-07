@@ -4,6 +4,8 @@ PyWord Pro is a Tkinter desktop word processor built as a local Python applicati
 
 <img width="1917" height="1057" alt="py_word_pro_2" src="https://github.com/user-attachments/assets/c39b1087-a975-4175-82e9-9e319c05bb5d" />
 <img width="1917" height="1057" alt="py_word_pro_1" src="https://github.com/user-attachments/assets/b24c2272-65d3-4195-aa04-1de8e6ad39f4" />
+<img width="1917" height="1057" alt="py_word_pro_3" src="https://github.com/user-attachments/assets/78f220f6-e835-4651-979b-42b3acfa18c9" />
+<img width="1917" height="1057" alt="py_word_pro_4" src="https://github.com/user-attachments/assets/a8e63a27-231c-4fe2-bf7c-1074bc5c03a1" />
 
 ## Run From Source
 
